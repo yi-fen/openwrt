@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
-PKG_NAME:=r8156
+PKG_NAME:=r8152
 PKG_VERSION:=2.14.0
 PKG_RELEASE:=1
 
