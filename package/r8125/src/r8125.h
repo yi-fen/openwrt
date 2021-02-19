@@ -357,7 +357,7 @@ do { \
 #define RSS_SUFFIX ""
 #endif
 
-#define RTL8125_VERSION "9.005.01" NAPI_SUFFIX DASH_SUFFIX REALWOW_SUFFIX PTP_SUFFIX RSS_SUFFIX
+#define RTL8125_VERSION "9.005.02" NAPI_SUFFIX DASH_SUFFIX REALWOW_SUFFIX PTP_SUFFIX RSS_SUFFIX
 #define MODULENAME "r8125"
 #define PFX MODULENAME ": "
 
@@ -1931,6 +1931,8 @@ struct rtl8125_private {
         u8 HwSuppD0SpeedUpVer;
         u8 D0SpeedUpSpeed;
 
+        u8 ring_lib_enabled;
+
         //Dash+++++++++++++++++
         u8 HwSuppDashVer;
         u8 DASH;
@@ -2020,8 +2022,7 @@ struct rtl8125_private {
         //Realwow--------------
 #endif //ENABLE_REALWOW_SUPPORT
 
-        u32 eee_adv_t;
-        u8 eee_enabled;
+        struct ethtool_eee eee;
 
 #ifdef ENABLE_R8125_PROCFS
         //Procfs support

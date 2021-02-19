@@ -700,7 +700,7 @@ static int proc_get_driver_variable(struct seq_file *m, void *v)
         seq_printf(m, "aspm\t0x%x\n", aspm);
         seq_printf(m, "s5wol\t0x%x\n", s5wol);
         seq_printf(m, "s5_keep_curr_mac\t0x%x\n", s5_keep_curr_mac);
-        seq_printf(m, "eee_enable\t0x%x\n", tp->eee_enabled);
+        seq_printf(m, "eee_enable\t0x%x\n", tp->eee.eee_enabled);
         seq_printf(m, "hwoptimize\t0x%lx\n", hwoptimize);
         seq_printf(m, "proc_init_num\t0x%x\n", proc_init_num);
         seq_printf(m, "s0_magic_packet\t0x%x\n", s0_magic_packet);
@@ -728,6 +728,7 @@ static int proc_get_driver_variable(struct seq_file *m, void *v)
         seq_printf(m, "ptp_master_mode\t0x%x\n", tp->ptp_master_mode);
         seq_printf(m, "min_irq_nvecs\t0x%x\n", tp->min_irq_nvecs);
         seq_printf(m, "irq_nvecs\t0x%x\n", tp->irq_nvecs);
+        seq_printf(m, "ring_lib_enabled\t0x%x\n", tp->ring_lib_enabled);
 #ifdef ENABLE_PTP_SUPPORT
         seq_printf(m, "tx_hwtstamp_timeouts\t0x%x\n", tp->tx_hwtstamp_timeouts);
         seq_printf(m, "tx_hwtstamp_skipped\t0x%x\n", tp->tx_hwtstamp_skipped);
@@ -1061,6 +1062,7 @@ static int proc_get_driver_variable(char *page, char **start,
                         "ptp_master_mode\t0x%x\n"
                         "min_irq_nvecs\t0x%x\n"
                         "irq_nvecs\t0x%x\n"
+                        "ring_lib_enabled\t0x%x\n"
 #ifdef ENABLE_PTP_SUPPORT
                         "tx_hwtstamp_timeouts\t0x%x\n"
                         "tx_hwtstamp_skipped\t0x%x\n"
@@ -1146,7 +1148,7 @@ static int proc_get_driver_variable(char *page, char **start,
                         aspm,
                         s5wol,
                         s5_keep_curr_mac,
-                        tp->eee_enabled,
+                        tp->eee.eee_enabled,
                         hwoptimize,
                         proc_init_num,
                         s0_magic_packet,
@@ -1174,6 +1176,7 @@ static int proc_get_driver_variable(char *page, char **start,
                         tp->ptp_master_mode,
                         tp->min_irq_nvecs,
                         tp->irq_nvecs,
+                        tp->ring_lib_enabled,
 #ifdef ENABLE_PTP_SUPPORT
                         tp->tx_hwtstamp_timeouts,
                         tp->tx_hwtstamp_skipped,
@@ -4433,7 +4436,7 @@ static int rtl8125_hw_set_features(struct net_device *dev,
         else
                 rx_config &= ~(AcceptErr | AcceptRunt);
 
-        if (dev->features & NETIF_F_HW_VLAN_RX)
+        if (features & NETIF_F_HW_VLAN_RX)
                 rx_config |= (EnableInnerVlan | EnableOuterVlan);
         else
                 rx_config &= ~(EnableInnerVlan | EnableOuterVlan);
@@ -4909,17 +4912,21 @@ static int _kc_ethtool_op_set_sg(struct net_device *dev, u32 data)
 
 static int rtl8125_enable_eee(struct rtl8125_private *tp)
 {
+        struct ethtool_eee *eee = &tp->eee;
+        u16 eee_adv_t = ethtool_adv_to_mmd_eee_adv_t(eee->advertised);
         int ret;
 
         ret = 0;
         switch (tp->mcfg) {
         case CFG_METHOD_2:
         case CFG_METHOD_3:
+                RTL_W16(tp, EEE_TXIDLE_TIMER_8125, eee->tx_lpi_timer);
+
                 SetMcuAccessRegBit(tp, 0xE040, (BIT_1|BIT_0));
                 SetMcuAccessRegBit(tp, 0xEB62, (BIT_2|BIT_1));
 
                 SetEthPhyOcpBit(tp, 0xA432, BIT_4);
-                SetEthPhyOcpBit(tp, 0xA5D0, tp->eee_adv_t);
+                SetEthPhyOcpBit(tp, 0xA5D0, eee_adv_t);
                 ClearEthPhyOcpBit(tp, 0xA6D4, BIT_0);
 
                 ClearEthPhyOcpBit(tp, 0xA6D8, BIT_4);
@@ -4928,10 +4935,15 @@ static int rtl8125_enable_eee(struct rtl8125_private *tp)
                 break;
         case CFG_METHOD_4:
         case CFG_METHOD_5:
+                RTL_W16(tp, EEE_TXIDLE_TIMER_8125, eee->tx_lpi_timer);
+
                 SetMcuAccessRegBit(tp, 0xE040, (BIT_1|BIT_0));
 
-                SetEthPhyOcpBit(tp, 0xA5D0, tp->eee_adv_t);
-                ClearEthPhyOcpBit(tp, 0xA6D4, BIT_0);
+                SetEthPhyOcpBit(tp, 0xA5D0, eee_adv_t);
+                if (eee->advertised & SUPPORTED_2500baseX_Full)
+                        SetEthPhyOcpBit(tp, 0xA6D4, BIT_0);
+                else
+                        ClearEthPhyOcpBit(tp, 0xA6D4, BIT_0);
 
                 ClearEthPhyOcpBit(tp, 0xA6D8, BIT_4);
                 ClearEthPhyOcpBit(tp, 0xA428, BIT_7);
@@ -5045,10 +5057,11 @@ static int rtl_nway_reset(struct net_device *dev)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0)
 static int
-rtl_ethtool_get_eee(struct net_device *net, struct ethtool_eee *eee)
+rtl_ethtool_get_eee(struct net_device *net, struct ethtool_eee *edata)
 {
         struct rtl8125_private *tp = netdev_priv(net);
-        u32 lp, adv, supported = 0;
+        struct ethtool_eee *eee = &tp->eee;
+        u32 lp, adv, tx_lpi_timer, supported = 0;
         unsigned long flags;
         u16 val;
 
@@ -5060,8 +5073,9 @@ rtl_ethtool_get_eee(struct net_device *net, struct ethtool_eee *eee)
         }
 
         /* Get Supported EEE */
-        val = mdio_direct_read_phy_ocp(tp, 0xA5C4);
-        supported = mmd_eee_cap_to_ethtool_sup_t(val);
+        //val = mdio_direct_read_phy_ocp(tp, 0xA5C4);
+        //supported = mmd_eee_cap_to_ethtool_sup_t(val);
+        supported = eee->supported;
 
         /* Get advertisement EEE */
         val = mdio_direct_read_phy_ocp(tp, 0xA5D0);
@@ -5071,25 +5085,33 @@ rtl_ethtool_get_eee(struct net_device *net, struct ethtool_eee *eee)
         val = mdio_direct_read_phy_ocp(tp, 0xA5D2);
         lp = mmd_eee_adv_to_ethtool_adv_t(val);
 
+        /* Get EEE Tx LPI timer*/
+        tx_lpi_timer = RTL_R16(tp, EEE_TXIDLE_TIMER_8125);
+
         val = rtl8125_mac_ocp_read(tp, 0xE040);
         val &= BIT_1 | BIT_0;
 
         spin_unlock_irqrestore(&tp->lock, flags);
 
-        eee->eee_enabled = !!val;
-        eee->eee_active = !!(supported & adv & lp);
-        eee->supported = supported;
-        eee->advertised = adv;
-        eee->lp_advertised = lp;
+        edata->eee_enabled = !!val;
+        edata->eee_active = !!(supported & adv & lp);
+        edata->supported = supported;
+        edata->advertised = adv;
+        edata->lp_advertised = lp;
+        edata->tx_lpi_enabled = edata->eee_enabled;
+        edata->tx_lpi_timer = tx_lpi_timer;
 
         return 0;
 }
 
 static int
-rtl_ethtool_set_eee(struct net_device *net, struct ethtool_eee *eee)
+rtl_ethtool_set_eee(struct net_device *net, struct ethtool_eee *edata)
 {
         struct rtl8125_private *tp = netdev_priv(net);
+        struct ethtool_eee *eee = &tp->eee;
+        u32 advertising;
         unsigned long flags;
+        int rc = 0;
 
         if (!HW_HAS_WRITE_PHY_MCU_RAM_CODE(tp) ||
             tp->DASH)
@@ -5098,24 +5120,71 @@ rtl_ethtool_set_eee(struct net_device *net, struct ethtool_eee *eee)
         spin_lock_irqsave(&tp->lock, flags);
 
         if (unlikely(tp->rtk_enable_diag)) {
-                spin_unlock_irqrestore(&tp->lock, flags);
-                return -EBUSY;
+                dev_printk(KERN_WARNING, &tp->pci_dev->dev, "Diag Enabled\n");
+                rc = -EBUSY;
+                goto exit_unlock;
         }
 
-        tp->eee_enabled = eee->eee_enabled;
-        tp->eee_adv_t = ethtool_adv_to_mmd_eee_adv_t(eee->advertised);
+        if (tp->autoneg != AUTONEG_ENABLE) {
+                dev_printk(KERN_WARNING, &tp->pci_dev->dev, "EEE requires autoneg\n");
+                rc = -EINVAL;
+                goto exit_unlock;
+        }
 
-        if (tp->eee_enabled) {
+        if (edata->tx_lpi_enabled) {
+                if (edata->tx_lpi_timer > tp->max_jumbo_frame_size ||
+                    edata->tx_lpi_timer < ETH_MIN_MTU) {
+                        dev_printk(KERN_WARNING, &tp->pci_dev->dev, "Valid LPI timer range is %d to %d. \n",
+                                   ETH_MIN_MTU, tp->max_jumbo_frame_size);
+                        rc = -EINVAL;
+                        goto exit_unlock;
+                }
+        }
+
+        advertising = tp->advertising;
+        if (!edata->advertised) {
+                edata->advertised = advertising & eee->supported;
+        } else if (edata->advertised & ~advertising) {
+                dev_printk(KERN_WARNING, &tp->pci_dev->dev, "EEE advertised %x must be a subset of autoneg advertised speeds %x\n",
+                           edata->advertised, advertising);
+                rc = -EINVAL;
+                goto exit_unlock;
+        }
+
+        if (edata->advertised & ~eee->supported) {
+                dev_printk(KERN_WARNING, &tp->pci_dev->dev, "EEE advertised %x must be a subset of support %x\n",
+                           edata->advertised, eee->supported);
+                rc = -EINVAL;
+                goto exit_unlock;
+        }
+
+        //tp->eee.eee_enabled = edata->eee_enabled;
+        //tp->eee_adv_t = ethtool_adv_to_mmd_eee_adv_t(edata->advertised);
+
+        dev_printk(KERN_WARNING, &tp->pci_dev->dev, "EEE tx_lpi_timer %x must be a subset of support %x\n",
+                   edata->tx_lpi_timer, eee->tx_lpi_timer);
+
+        eee->advertised = edata->advertised;
+        eee->tx_lpi_enabled = edata->tx_lpi_enabled;
+        eee->tx_lpi_timer = edata->tx_lpi_timer;
+        eee->eee_enabled = edata->eee_enabled;
+
+        if (eee->eee_enabled)
                 rtl8125_enable_eee(tp);
-        } else {
+        else
                 rtl8125_disable_eee(tp);
-        }
 
         spin_unlock_irqrestore(&tp->lock, flags);
 
         rtl_nway_reset(net);
 
-        return 0;
+        return rc;
+
+exit_unlock:
+
+        spin_unlock_irqrestore(&tp->lock, flags);
+
+        return rc;
 }
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0) */
 
@@ -8527,9 +8596,6 @@ rtl8125_hw_phy_config_8125a_2(struct net_device *dev)
                                );
 
 
-        RTL_W16(tp, EEE_TXIDLE_TIMER_8125, dev->mtu + ETH_HLEN + 0x20);
-
-
         mdio_direct_write_phy_ocp(tp, 0xB87C, 0x80A2);
         mdio_direct_write_phy_ocp(tp, 0xB87E, 0x0153);
         mdio_direct_write_phy_ocp(tp, 0xB87C, 0x809C);
@@ -8943,9 +9009,6 @@ rtl8125_hw_phy_config_8125b_1(struct net_device *dev)
         mdio_direct_write_phy_ocp(tp, 0xB87E, 0x050E);
 
 
-        RTL_W16(tp, EEE_TXIDLE_TIMER_8125, dev->mtu + ETH_HLEN + 0x20);
-
-
         mdio_direct_write_phy_ocp(tp, 0xA436, 0x816C);
         mdio_direct_write_phy_ocp(tp, 0xA438, 0xC4A0);
         mdio_direct_write_phy_ocp(tp, 0xA436, 0x8170);
@@ -9135,7 +9198,7 @@ rtl8125_hw_phy_config_8125b_2(struct net_device *dev)
                                );
 
 
-        RTL_W16(tp, EEE_TXIDLE_TIMER_8125, dev->mtu + ETH_HLEN + 0x20);
+        RTL_W16(tp, EEE_TXIDLE_TIMER_8125, tp->eee.tx_lpi_timer);
 
         mdio_direct_write_phy_ocp(tp, 0xB87C, 0x80F5);
         mdio_direct_write_phy_ocp(tp, 0xB87E, 0x760E);
@@ -9303,7 +9366,7 @@ rtl8125_hw_phy_config(struct net_device *dev)
         rtl8125_mdio_write(tp, 0x1F, 0x0000);
 
         if (HW_HAS_WRITE_PHY_MCU_RAM_CODE(tp)) {
-                if (tp->eee_enabled == 1)
+                if (tp->eee.eee_enabled)
                         rtl8125_enable_eee(tp);
                 else
                         rtl8125_disable_eee(tp);
@@ -9447,6 +9510,10 @@ rtl8125_init_software_variable(struct net_device *dev)
         struct pci_dev *pdev = tp->pci_dev;
 
         rtl8125_get_bios_setting(dev);
+
+#ifdef ENABLE_LIB_SUPPORT
+        tp->ring_lib_enabled = 1;
+#endif
 
         switch (tp->mcfg) {
         case CFG_METHOD_2:
@@ -9819,8 +9886,22 @@ rtl8125_init_software_variable(struct net_device *dev)
         dev->min_mtu = ETH_MIN_MTU;
         dev->max_mtu = tp->max_jumbo_frame_size;
 #endif //LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
-        tp->eee_enabled = eee_enable;
-        tp->eee_adv_t = MDIO_EEE_1000T | MDIO_EEE_100TX;
+
+        if (tp->mcfg != CFG_METHOD_DEFAULT) {
+                struct ethtool_eee *eee = &tp->eee;
+
+                eee->eee_enabled = eee_enable;
+                eee->supported  = SUPPORTED_100baseT_Full |
+                                  SUPPORTED_1000baseT_Full;
+                switch (tp->mcfg) {
+                case CFG_METHOD_4:
+                case CFG_METHOD_5:
+                        eee->supported |= SUPPORTED_2500baseX_Full;
+                        break;
+                }
+                eee->advertised = mmd_eee_adv_to_ethtool_adv_t(MDIO_EEE_1000T | MDIO_EEE_100TX);
+                tp->eee.tx_lpi_timer = dev->mtu + ETH_HLEN + 0x20;
+        }
 
         tp->ptp_master_mode = enable_ptp_master_mode;
 }
@@ -13151,14 +13232,21 @@ __be16 get_protocol(struct sk_buff *skb)
 static inline
 u8 rtl8125_get_l4_protocol(struct sk_buff *skb)
 {
+        int no = skb_network_offset(skb);
+        struct ipv6hdr *i6h, _i6h;
+        struct iphdr *ih, _ih;
         u8 ip_protocol = IPPROTO_RAW;
 
         switch (get_protocol(skb)) {
         case  __constant_htons(ETH_P_IP):
-                ip_protocol = ip_hdr(skb)->protocol;
+                ih = skb_header_pointer(skb, no, sizeof(_ih), &_ih);
+                if (ih)
+                        ip_protocol = ih->protocol;
                 break;
         case  __constant_htons(ETH_P_IPV6):
-                ip_protocol = ipv6_hdr(skb)->nexthdr;
+                i6h = skb_header_pointer(skb, no, sizeof(_i6h), &_i6h);
+                if (i6h)
+                        ip_protocol = i6h->nexthdr;
                 break;
         }
 
