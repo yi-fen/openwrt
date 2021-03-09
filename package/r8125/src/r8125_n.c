@@ -117,13 +117,13 @@ static const struct {
 
         _R("RTL8125B",
         CFG_METHOD_4,
-        BIT_30 | EnableInnerVlan | EnableOuterVlan | (RX_DMA_BURST << RxCfgDMAShift),
+        BIT_30 | RxCfg_pause_slot_en | EnableInnerVlan | EnableOuterVlan | (RX_DMA_BURST << RxCfgDMAShift),
         0xff7e5880,
         Jumbo_Frame_9k),
 
         _R("RTL8125B",
         CFG_METHOD_5,
-        BIT_30 | EnableInnerVlan | EnableOuterVlan | (RX_DMA_BURST << RxCfgDMAShift),
+        BIT_30 | RxCfg_pause_slot_en | EnableInnerVlan | EnableOuterVlan | (RX_DMA_BURST << RxCfgDMAShift),
         0xff7e5880,
         Jumbo_Frame_9k),
 
@@ -729,6 +729,8 @@ static int proc_get_driver_variable(struct seq_file *m, void *v)
         seq_printf(m, "min_irq_nvecs\t0x%x\n", tp->min_irq_nvecs);
         seq_printf(m, "irq_nvecs\t0x%x\n", tp->irq_nvecs);
         seq_printf(m, "ring_lib_enabled\t0x%x\n", tp->ring_lib_enabled);
+        seq_printf(m, "HwSuppIsrVer\t0x%x\n", tp->HwSuppIsrVer);
+        seq_printf(m, "HwCurrIsrVer\t0x%x\n", tp->HwCurrIsrVer);
 #ifdef ENABLE_PTP_SUPPORT
         seq_printf(m, "tx_hwtstamp_timeouts\t0x%x\n", tp->tx_hwtstamp_timeouts);
         seq_printf(m, "tx_hwtstamp_skipped\t0x%x\n", tp->tx_hwtstamp_skipped);
@@ -1063,6 +1065,8 @@ static int proc_get_driver_variable(char *page, char **start,
                         "min_irq_nvecs\t0x%x\n"
                         "irq_nvecs\t0x%x\n"
                         "ring_lib_enabled\t0x%x\n"
+                        "HwSuppIsrVer\t0x%x\n"
+                        "HwCurrIsrVer\t0x%x\n"
 #ifdef ENABLE_PTP_SUPPORT
                         "tx_hwtstamp_timeouts\t0x%x\n"
                         "tx_hwtstamp_skipped\t0x%x\n"
@@ -1177,6 +1181,8 @@ static int proc_get_driver_variable(char *page, char **start,
                         tp->min_irq_nvecs,
                         tp->irq_nvecs,
                         tp->ring_lib_enabled,
+                        tp->HwSuppIsrVer,
+                        tp->HwCurrIsrVer,
 #ifdef ENABLE_PTP_SUPPORT
                         tp->tx_hwtstamp_timeouts,
                         tp->tx_hwtstamp_skipped,
@@ -3204,29 +3210,31 @@ rtl8125_link_down_patch(struct net_device *dev)
 }
 
 static void
-rtl8125_check_link_status(struct net_device *dev, bool force_set)
+_rtl8125_check_link_status(struct net_device *dev)
 {
         struct rtl8125_private *tp = netdev_priv(dev);
-        int link_status_on;
 
-        link_status_on = tp->link_ok(dev);
+        if (tp->link_ok(dev)) {
+                rtl8125_link_on_patch(dev);
 
-        if (force_set || (netif_carrier_ok(dev) != link_status_on)) {
-                if (link_status_on) {
-                        rtl8125_link_on_patch(dev);
+                if (netif_msg_ifup(tp))
+                        printk(KERN_INFO PFX "%s: link up\n", dev->name);
+        } else {
+                if (netif_msg_ifdown(tp))
+                        printk(KERN_INFO PFX "%s: link down\n", dev->name);
 
-                        if (netif_msg_ifup(tp))
-                                printk(KERN_INFO PFX "%s: link up\n", dev->name);
-                } else {
-                        if (netif_msg_ifdown(tp))
-                                printk(KERN_INFO PFX "%s: link down\n", dev->name);
-
-                        rtl8125_link_down_patch(dev);
-                }
-
-                if (!force_set)
-                        tp->resume_not_chg_speed = 0;
+                rtl8125_link_down_patch(dev);
         }
+}
+
+static void
+rtl8125_check_link_status(struct net_device *dev)
+{
+        struct rtl8125_private *tp = netdev_priv(dev);
+
+        _rtl8125_check_link_status(dev);
+
+        tp->resume_not_chg_speed = 0;
 }
 
 static void
@@ -5056,6 +5064,31 @@ static int rtl_nway_reset(struct net_device *dev)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0)
+static u32
+rtl8125_tx_lpi_timer_to_us(struct rtl8125_private *tp , u32 tx_lpi_timer)
+{
+        u32 to_us;
+        u16 status;
+
+        //2.5G : tx_lpi_timer * 3.2ns
+        //Giga: tx_lpi_timer * 8ns
+        //100M : tx_lpi_timer * 80ns
+        to_us = tx_lpi_timer * 80;
+        status = RTL_R16(tp, PHYstatus);
+        if (status & LinkStatus) {
+                /*link on*/
+                if (status & _2500bpsF)
+                        to_us = (tx_lpi_timer * 32) / 10;
+                else if (status & _1000bpsF)
+                        to_us = tx_lpi_timer * 8;
+        }
+
+        //ns to us
+        to_us /= 1000;
+
+        return to_us;
+}
+
 static int
 rtl_ethtool_get_eee(struct net_device *net, struct ethtool_eee *edata)
 {
@@ -5099,7 +5132,7 @@ rtl_ethtool_get_eee(struct net_device *net, struct ethtool_eee *edata)
         edata->advertised = adv;
         edata->lp_advertised = lp;
         edata->tx_lpi_enabled = edata->eee_enabled;
-        edata->tx_lpi_timer = tx_lpi_timer;
+        edata->tx_lpi_timer = rtl8125_tx_lpi_timer_to_us(tp, tx_lpi_timer);
 
         return 0;
 }
@@ -9900,7 +9933,7 @@ rtl8125_init_software_variable(struct net_device *dev)
                         break;
                 }
                 eee->advertised = mmd_eee_adv_to_ethtool_adv_t(MDIO_EEE_1000T | MDIO_EEE_100TX);
-                tp->eee.tx_lpi_timer = dev->mtu + ETH_HLEN + 0x20;
+                eee->tx_lpi_timer = dev->mtu + ETH_HLEN + 0x20;
         }
 
         tp->ptp_master_mode = enable_ptp_master_mode;
@@ -11139,6 +11172,7 @@ rtl8125_esd_timer(struct timer_list *t)
                 rtl8125_hw_ephy_config(dev);
                 rtl8125_hw_phy_config(dev);
                 rtl8125_hw_config(dev);
+                rtl8125_enable_hw_linkchg_interrupt(tp);
                 rtl8125_set_speed(dev, tp->autoneg, tp->speed, tp->duplex, tp->advertising);
                 tp->esd_flag = 0;
         }
@@ -11167,7 +11201,7 @@ rtl8125_link_timer(struct timer_list *t)
         unsigned long flags;
 
         spin_lock_irqsave(&tp->lock, flags);
-        rtl8125_check_link_status(dev, 0);
+        rtl8125_check_link_status(dev);
         spin_unlock_irqrestore(&tp->lock, flags);
 
         mod_timer(timer, jiffies + RTL8125_LINK_TIMEOUT);
@@ -12040,12 +12074,10 @@ static int rtl8125_open(struct net_device *dev)
                 rtl8125_ptp_init(tp);
 #endif
 
-        rtl8125_set_speed(dev, tp->autoneg, tp->speed, tp->duplex, tp->advertising);
-
-        if (tp->resume_not_chg_speed) {
-                rtl8125_check_link_status(dev, 1);
-                tp->resume_not_chg_speed = 0;
-        }
+        if (tp->resume_not_chg_speed)
+                rtl8125_check_link_status(dev);
+        else
+                rtl8125_set_speed(dev, tp->autoneg, tp->speed, tp->duplex, tp->advertising);
 
         spin_unlock_irqrestore(&tp->lock, flags);
 
@@ -12572,9 +12604,10 @@ rtl8125_change_mtu(struct net_device *dev,
         rtl8125_enable_napi(tp);
 #endif//CONFIG_R8125_NAPI
 
-        rtl8125_stop_all_tx_queue(dev);
-        netif_carrier_off(dev);
+        //rtl8125_stop_all_tx_queue(dev);
+        //netif_carrier_off(dev);
         rtl8125_hw_config(dev);
+        rtl8125_enable_hw_linkchg_interrupt(tp);
 
         rtl8125_set_speed(dev, tp->autoneg, tp->speed, tp->duplex, tp->advertising);
 
@@ -14100,7 +14133,7 @@ static irqreturn_t rtl8125_interrupt(int irq, void *dev_instance)
                 RTL_W32(tp, tp->isr_reg[0], status&~RxFIFOOver);
 
                 if (rtl8125_linkchg_interrupt(tp, status))
-                        rtl8125_check_link_status(dev, 0);
+                        rtl8125_check_link_status(dev);
 
 #ifdef ENABLE_DASH_SUPPORT
                 if (tp->DASH) {
@@ -14196,7 +14229,7 @@ static irqreturn_t rtl8125_interrupt_msix(int irq, void *dev_instance)
 
                 //link change
                 if (message_id == 21) {
-                        rtl8125_check_link_status(dev, 0);
+                        rtl8125_check_link_status(dev);
                         return IRQ_HANDLED;
                 }
 
@@ -14320,6 +14353,11 @@ static void rtl8125_shutdown(struct pci_dev *pdev)
 
         rtl8125_close(dev);
         rtl8125_disable_msi(pdev, tp);
+
+        if (system_state == SYSTEM_POWER_OFF) {
+                pci_wake_from_d3(pdev, tp->wol_enabled);
+                pci_set_power_state(pdev, PCI_D3hot);
+        }
 }
 #endif
 
@@ -14400,6 +14438,8 @@ rtl8125_suspend(struct pci_dev *pdev, pm_message_t state)
                 rtl8125_driver_stop(tp);
 out:
 
+        pci_disable_device(pdev);
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
         pci_save_state(pdev, &pci_pm_state);
 #else
@@ -14408,7 +14448,8 @@ out:
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29)
         pci_enable_wake(pdev, pci_choose_state(pdev, state), tp->wol_enabled);
 #endif
-        //pci_set_power_state(pdev, pci_choose_state(pdev, state));
+
+        pci_prepare_to_sleep(pdev);
 
         return 0;
 }
@@ -14438,14 +14479,21 @@ rtl8125_resume(struct device *device)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
         u32 pci_pm_state = PCI_D0;
 #endif
+        u32 err;
 
-        pci_set_power_state(pdev, PCI_D0);
+        err = pci_enable_device(pdev);
+        if (err) {
+                dev_err(&pdev->dev, "Cannot enable PCI device from suspend\n");
+                return err;
+        }
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
         pci_restore_state(pdev, &pci_pm_state);
 #else
         pci_restore_state(pdev);
 #endif
         pci_enable_wake(pdev, PCI_D0, 0);
+
+        pci_set_master(pdev);
 
         spin_lock_irqsave(&tp->lock, flags);
 
@@ -14480,9 +14528,13 @@ rtl8125_resume(struct device *device)
 
         spin_unlock_irqrestore(&tp->lock, flags);
 
-        if (tp->resume_not_chg_speed)
-                rtl8125_check_link_status(dev, 1);
-        else
+        if (tp->resume_not_chg_speed) {
+                spin_lock_irqsave(&tp->lock, flags);
+
+                _rtl8125_check_link_status(dev);
+
+                spin_unlock_irqrestore(&tp->lock, flags);
+        } else
                 rtl8125_schedule_work(dev, rtl8125_reset_task);
 
         netif_device_attach(dev);

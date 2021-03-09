@@ -399,14 +399,14 @@ void rtl8125_disable_ring(struct rtl8125_ring *ring)
         dev = tp->dev;
 
         rtl8125_hw_reset(dev);
-        rtl8125_tx_clear(tp);
-        rtl8125_rx_clear(tp);
-        rtl8125_init_ring(dev);
+        //rtl8125_tx_clear(tp);
+        //rtl8125_rx_clear(tp);
+        //rtl8125_init_ring(dev);
 
         ring->enabled = false;
 
-        rtl8125_hw_config(dev);
-        rtl8125_hw_start(dev);
+        //rtl8125_hw_config(dev);
+        //rtl8125_hw_start(dev);
 }
 EXPORT_SYMBOL(rtl8125_disable_ring);
 

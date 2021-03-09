@@ -357,7 +357,7 @@ do { \
 #define RSS_SUFFIX ""
 #endif
 
-#define RTL8125_VERSION "9.005.02" NAPI_SUFFIX DASH_SUFFIX REALWOW_SUFFIX PTP_SUFFIX RSS_SUFFIX
+#define RTL8125_VERSION "9.005.03" NAPI_SUFFIX DASH_SUFFIX REALWOW_SUFFIX PTP_SUFFIX RSS_SUFFIX
 #define MODULENAME "r8125"
 #define PFX MODULENAME ": "
 
@@ -1284,6 +1284,7 @@ enum RTL8125_register_content {
         RxCfg_128_int_en = (1 << 15),
         RxCfg_fet_multi_en = (1 << 14),
         RxCfg_half_refetch = (1 << 13),
+        RxCfg_pause_slot_en = (1 << 11),
         RxCfg_9356SEL = (1 << 6),
 
         /* TxConfigBits */
